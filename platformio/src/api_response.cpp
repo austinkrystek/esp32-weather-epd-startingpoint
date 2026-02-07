@@ -263,31 +263,28 @@ DeserializationError deserializeAirQuality(WiFiClient &json,
  */
 bool deserializeCoinGecko(WiFiClient &json, page_data_t &page)
 {
+  // Use filter[0] pattern — ArduinoJson v7 applies it to ALL array elements
   JsonDocument filter;
-  // Filter to reduce memory: only extract what we need
-  for (int i = 0; i < ASSETS_PER_PAGE; ++i)
-  {
-    filter[i]["id"]                                = true;
-    filter[i]["symbol"]                            = true;
-    filter[i]["name"]                              = true;
-    filter[i]["current_price"]                     = true;
-    filter[i]["price_change_percentage_24h"]        = true;
-    filter[i]["price_change_percentage_7d_in_currency"]  = true;
-    filter[i]["price_change_percentage_30d_in_currency"] = true;
-    filter[i]["price_change_percentage_1y_in_currency"]  = true;
-    filter[i]["sparkline_in_7d"]["price"]           = true;
-  }
+  filter[0]["id"]                                       = true;
+  filter[0]["symbol"]                                   = true;
+  filter[0]["name"]                                     = true;
+  filter[0]["current_price"]                            = true;
+  filter[0]["price_change_percentage_24h"]               = true;
+  filter[0]["price_change_percentage_7d_in_currency"]    = true;
+  filter[0]["price_change_percentage_30d_in_currency"]   = true;
+  filter[0]["price_change_percentage_1y_in_currency"]    = true;
+  filter[0]["sparkline_in_7d"]["price"]                  = true;
 
   JsonDocument doc;
   DeserializationError error = deserializeJson(doc, json,
                                          DeserializationOption::Filter(filter));
-#if DEBUG_LEVEL >= 1
-  Serial.println("[debug] CoinGecko doc.overflowed() : "
+  Serial.println("[CoinGecko] doc.overflowed(): "
                  + String(doc.overflowed()));
-#endif
+  Serial.println("[CoinGecko] doc memory used: "
+                 + String(doc.memoryUsage()) + " bytes");
   if (error)
   {
-    Serial.println("CoinGecko deserialize error: " + String(error.c_str()));
+    Serial.println("[CoinGecko] deserialize error: " + String(error.c_str()));
     return false;
   }
 

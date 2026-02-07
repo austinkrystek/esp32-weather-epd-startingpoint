@@ -292,14 +292,17 @@ int fetchCoinGecko(page_data_t &page)
 
   String ids = String(CRYPTO_1_ID) + "," + CRYPTO_2_ID + ","
              + CRYPTO_3_ID + "," + CRYPTO_4_ID;
+  // Pass API key as URL parameter (more reliable than custom header on ESP32)
+  String apiKey = COINGECKO_API_KEY;
   String uri = "/api/v3/coins/markets"
                "?vs_currency=" COINGECKO_VS_CURRENCY
                "&ids=" + ids +
                "&sparkline=true"
                "&price_change_percentage=24h,7d,30d,1y";
-
-  // Add API key header if provided
-  String apiKey = COINGECKO_API_KEY;
+  if (String(apiKey).length() > 0)
+  {
+    uri += "&x_cg_demo_api_key=" + apiKey;
+  }
 
   // Initialize assets with user config display info (before fetch, so names
   // show even on failure)
@@ -314,6 +317,7 @@ int fetchCoinGecko(page_data_t &page)
   strncpy(page.assets[3].name, CRYPTO_4_NAME, sizeof(page.assets[3].name) - 1);
 
   Serial.println("  GET api.coingecko.com" + uri);
+  Serial.println("  Free heap before CoinGecko: " + String(ESP.getFreeHeap()));
 
   int httpResponse = 0;
   int attempts = 0;
@@ -327,10 +331,6 @@ int fetchCoinGecko(page_data_t &page)
 
     http.begin(client, "api.coingecko.com", 443, uri, true);
     http.addHeader("Accept", "application/json");
-    if (apiKey.length() > 0)
-    {
-      http.addHeader("x-cg-demo-api-key", apiKey);
-    }
 
     httpResponse = http.GET();
     Serial.println("  CoinGecko response: " + String(httpResponse));
