@@ -247,7 +247,7 @@ typedef struct page_data
 } page_data_t;
 
 // Deserialization functions for financial APIs
-bool deserializeCoinGecko(WiFiClient &json, page_data_t &page);
+bool deserializeCoinGecko(const String &jsonStr, page_data_t &page);
 bool deserializeYahooFinance(WiFiClient &json, asset_data_t &asset);
 
 #endif

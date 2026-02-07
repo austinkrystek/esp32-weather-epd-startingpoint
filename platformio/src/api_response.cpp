@@ -256,14 +256,13 @@ DeserializationError deserializeAirQuality(WiFiClient &json,
 } // end deserializeAirQuality
 
 /* Deserialize CoinGecko /coins/markets API response.
- * Expects the response for 4 coins with sparkline=true and
- * price_change_percentage=24h,7d,30d,1y.
+ * Accepts the full JSON response as a String (not a stream) because
+ * ArduinoJson's stream reader can fail on large CoinGecko HTTPS responses.
  *
  * Returns true on success.
  */
-bool deserializeCoinGecko(WiFiClient &json, page_data_t &page)
+bool deserializeCoinGecko(const String &jsonStr, page_data_t &page)
 {
-  // Use filter[0] pattern — ArduinoJson v7 applies it to ALL array elements
   JsonDocument filter;
   filter[0]["id"]                                       = true;
   filter[0]["symbol"]                                   = true;
@@ -276,7 +275,7 @@ bool deserializeCoinGecko(WiFiClient &json, page_data_t &page)
   filter[0]["sparkline_in_7d"]["price"]                  = true;
 
   JsonDocument doc;
-  DeserializationError error = deserializeJson(doc, json,
+  DeserializationError error = deserializeJson(doc, jsonStr,
                                          DeserializationOption::Filter(filter));
   Serial.println("[CoinGecko] doc.overflowed(): "
                  + String(doc.overflowed()));
@@ -297,18 +296,17 @@ bool deserializeCoinGecko(WiFiClient &json, page_data_t &page)
     asset_data_t &a = page.assets[idx];
 
     const char *sym = coin["symbol"] | "";
-    const char *name = coin["name"] | "";
+    const char *cname = coin["name"] | "";
     strncpy(a.symbol, sym, sizeof(a.symbol) - 1);
     a.symbol[sizeof(a.symbol) - 1] = '\0';
-    strncpy(a.name, name, sizeof(a.name) - 1);
+    strncpy(a.name, cname, sizeof(a.name) - 1);
     a.name[sizeof(a.name) - 1] = '\0';
-    // displaySymbol is set by the caller from user_config.h
 
-    a.price         = coin["current_price"]                     | 0.0f;
-    a.change_day    = coin["price_change_percentage_24h"]        | 0.0f;
-    a.change_week   = coin["price_change_percentage_7d_in_currency"]  | 0.0f;
-    a.change_month  = coin["price_change_percentage_30d_in_currency"] | 0.0f;
-    a.change_ytd    = coin["price_change_percentage_1y_in_currency"]  | 0.0f;
+    a.price         = coin["current_price"]                            | 0.0f;
+    a.change_day    = coin["price_change_percentage_24h"]               | 0.0f;
+    a.change_week   = coin["price_change_percentage_7d_in_currency"]    | 0.0f;
+    a.change_month  = coin["price_change_percentage_30d_in_currency"]   | 0.0f;
+    a.change_ytd    = coin["price_change_percentage_1y_in_currency"]    | 0.0f;
     a.previousClose = a.price / (1.0f + a.change_day / 100.0f);
 
     // Extract sparkline data (7-day, ~168 points) — downsample to 30 points
@@ -324,12 +322,16 @@ bool deserializeCoinGecko(WiFiClient &json, page_data_t &page)
         a.sparkline[a.sparklineCount++] = sparkArr[s].as<float>();
       }
     }
+
+    Serial.println("[CoinGecko] Parsed: " + String(a.name)
+                   + " $" + String(a.price, 2));
     a.valid = true;
     ++idx;
   }
 
   page.lastUpdated = time(nullptr);
   page.valid = (idx > 0);
+  Serial.println("[CoinGecko] Parsed " + String(idx) + " coins");
   return page.valid;
 } // end deserializeCoinGecko
 
