@@ -82,9 +82,9 @@
 #define COMMODITY_4_UNIT     "/lb"
 
 // ── Page 4: CURRENCIES ──────────────────────────────────────
-// Yahoo Finance forex: CADUSD=X, EURUSD=X, JPY=X, GBPUSD=X,
+// Yahoo Finance forex: USDCAD=X, EURUSD=X, JPY=X, GBPUSD=X,
 //   AUDUSD=X, NZDUSD=X, CHFUSD=X, CNYUSD=X
-#define FX_1_SYMBOL   "CADUSD=X"
+#define FX_1_SYMBOL   "USDCAD=X"
 #define FX_1_DISPLAY  "$/$"
 #define FX_1_NAME     "USD / CAD"
 
