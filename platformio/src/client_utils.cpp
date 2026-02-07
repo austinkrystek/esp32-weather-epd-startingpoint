@@ -288,14 +288,11 @@ int fetchCoinGecko(page_data_t &page)
 
   WiFiClientSecure client;
   client.setInsecure(); // CoinGecko uses HTTPS, skip cert verification
-
-  HTTPClient http;
-  http.setConnectTimeout(HTTP_CLIENT_TCP_TIMEOUT);
-  http.setTimeout(HTTP_CLIENT_TCP_TIMEOUT);
+  client.setHandshakeTimeout(10); // 10 seconds for TLS handshake
 
   String ids = String(CRYPTO_1_ID) + "," + CRYPTO_2_ID + ","
              + CRYPTO_3_ID + "," + CRYPTO_4_ID;
-  String url = "https://api.coingecko.com/api/v3/coins/markets"
+  String uri = "/api/v3/coins/markets"
                "?vs_currency=" COINGECKO_VS_CURRENCY
                "&ids=" + ids +
                "&sparkline=true"
@@ -304,38 +301,63 @@ int fetchCoinGecko(page_data_t &page)
   // Add API key header if provided
   String apiKey = COINGECKO_API_KEY;
 
-  Serial.println("  GET " + url);
-  http.begin(client, url);
-  http.addHeader("Accept", "application/json");
-  if (apiKey.length() > 0)
+  // Initialize assets with user config display info (before fetch, so names
+  // show even on failure)
+  strncpy(page.assets[0].displaySymbol, CRYPTO_1_SYMBOL, sizeof(page.assets[0].displaySymbol) - 1);
+  strncpy(page.assets[1].displaySymbol, CRYPTO_2_SYMBOL, sizeof(page.assets[1].displaySymbol) - 1);
+  strncpy(page.assets[2].displaySymbol, CRYPTO_3_SYMBOL, sizeof(page.assets[2].displaySymbol) - 1);
+  strncpy(page.assets[3].displaySymbol, CRYPTO_4_SYMBOL, sizeof(page.assets[3].displaySymbol) - 1);
+
+  strncpy(page.assets[0].name, CRYPTO_1_NAME, sizeof(page.assets[0].name) - 1);
+  strncpy(page.assets[1].name, CRYPTO_2_NAME, sizeof(page.assets[1].name) - 1);
+  strncpy(page.assets[2].name, CRYPTO_3_NAME, sizeof(page.assets[2].name) - 1);
+  strncpy(page.assets[3].name, CRYPTO_4_NAME, sizeof(page.assets[3].name) - 1);
+
+  Serial.println("  GET api.coingecko.com" + uri);
+
+  int httpResponse = 0;
+  int attempts = 0;
+  bool rxSuccess = false;
+
+  while (!rxSuccess && attempts < 3)
   {
-    http.addHeader("x-cg-demo-api-key", apiKey);
-  }
+    HTTPClient http;
+    http.setConnectTimeout(HTTP_CLIENT_TCP_TIMEOUT);
+    http.setTimeout(HTTP_CLIENT_TCP_TIMEOUT);
 
-  int httpResponse = http.GET();
-  Serial.println("  CoinGecko response: " + String(httpResponse));
-
-  if (httpResponse == HTTP_CODE_OK)
-  {
-    // Initialize assets with user config display info
-    strncpy(page.assets[0].displaySymbol, CRYPTO_1_SYMBOL, sizeof(page.assets[0].displaySymbol) - 1);
-    strncpy(page.assets[1].displaySymbol, CRYPTO_2_SYMBOL, sizeof(page.assets[1].displaySymbol) - 1);
-    strncpy(page.assets[2].displaySymbol, CRYPTO_3_SYMBOL, sizeof(page.assets[2].displaySymbol) - 1);
-    strncpy(page.assets[3].displaySymbol, CRYPTO_4_SYMBOL, sizeof(page.assets[3].displaySymbol) - 1);
-
-    strncpy(page.assets[0].name, CRYPTO_1_NAME, sizeof(page.assets[0].name) - 1);
-    strncpy(page.assets[1].name, CRYPTO_2_NAME, sizeof(page.assets[1].name) - 1);
-    strncpy(page.assets[2].name, CRYPTO_3_NAME, sizeof(page.assets[2].name) - 1);
-    strncpy(page.assets[3].name, CRYPTO_4_NAME, sizeof(page.assets[3].name) - 1);
-
-    if (!deserializeCoinGecko(http.getStream(), page))
+    http.begin(client, "api.coingecko.com", 443, uri, true);
+    http.addHeader("Accept", "application/json");
+    if (apiKey.length() > 0)
     {
-      httpResponse = -256; // deserialization error
+      http.addHeader("x-cg-demo-api-key", apiKey);
     }
+
+    httpResponse = http.GET();
+    Serial.println("  CoinGecko response: " + String(httpResponse));
+
+    if (httpResponse == HTTP_CODE_OK)
+    {
+      if (deserializeCoinGecko(http.getStream(), page))
+      {
+        rxSuccess = true;
+      }
+      else
+      {
+        Serial.println("  CoinGecko deserialization failed");
+        httpResponse = -256;
+      }
+    }
+    else
+    {
+      Serial.println("  CoinGecko HTTP error, attempt "
+                     + String(attempts + 1) + "/3");
+    }
+
+    client.stop();
+    http.end();
+    ++attempts;
   }
 
-  client.stop();
-  http.end();
   return httpResponse;
 } // end fetchCoinGecko
 
@@ -351,35 +373,50 @@ int fetchYahooFinance(const char *symbol, asset_data_t &asset)
 
   WiFiClientSecure client;
   client.setInsecure(); // Yahoo Finance uses HTTPS
-
-  HTTPClient http;
-  http.setConnectTimeout(HTTP_CLIENT_TCP_TIMEOUT);
-  http.setTimeout(HTTP_CLIENT_TCP_TIMEOUT);
+  client.setHandshakeTimeout(10); // 10 seconds for TLS handshake
 
   // URL-encode the symbol (^ needs encoding)
   String encodedSymbol = symbol;
   encodedSymbol.replace("^", "%5E");
 
-  String url = "https://query1.finance.yahoo.com/v8/finance/chart/"
+  String uri = "/v8/finance/chart/"
              + encodedSymbol + "?range=1mo&interval=1d";
 
-  http.begin(client, url);
-  http.addHeader("Accept", "application/json");
-  http.addHeader("User-Agent", "ESP32-Ticker/1.0");
+  int httpResponse = 0;
+  int attempts = 0;
+  bool rxSuccess = false;
 
-  int httpResponse = http.GET();
-  Serial.println("    Response: " + String(httpResponse));
-
-  if (httpResponse == HTTP_CODE_OK)
+  while (!rxSuccess && attempts < 2)
   {
-    if (!deserializeYahooFinance(http.getStream(), asset))
+    HTTPClient http;
+    http.setConnectTimeout(HTTP_CLIENT_TCP_TIMEOUT);
+    http.setTimeout(HTTP_CLIENT_TCP_TIMEOUT);
+
+    http.begin(client, "query1.finance.yahoo.com", 443, uri, true);
+    http.addHeader("Accept", "application/json");
+    http.addHeader("User-Agent", "ESP32-Ticker/1.0");
+
+    httpResponse = http.GET();
+    Serial.println("    Response: " + String(httpResponse));
+
+    if (httpResponse == HTTP_CODE_OK)
     {
-      httpResponse = -256;
+      if (deserializeYahooFinance(http.getStream(), asset))
+      {
+        rxSuccess = true;
+      }
+      else
+      {
+        Serial.println("    Yahoo Finance deserialization failed");
+        httpResponse = -256;
+      }
     }
+
+    client.stop();
+    http.end();
+    ++attempts;
   }
 
-  client.stop();
-  http.end();
   return httpResponse;
 } // end fetchYahooFinance
 
