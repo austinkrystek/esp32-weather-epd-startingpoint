@@ -337,13 +337,27 @@ int fetchCoinGecko(page_data_t &page)
 
     if (httpResponse == HTTP_CODE_OK)
     {
-      if (deserializeCoinGecko(http.getStream(), page))
+      // Read full response into String (stream parsing fails on CoinGecko
+      // HTTPS responses due to chunked/TLS issues)
+      String body = http.getString();
+      Serial.println("  CoinGecko body length: " + String(body.length()));
+      if (body.length() > 0)
       {
-        rxSuccess = true;
+        Serial.println("  CoinGecko body preview: "
+                       + body.substring(0, 120));
+        if (deserializeCoinGecko(body, page))
+        {
+          rxSuccess = true;
+        }
+        else
+        {
+          Serial.println("  CoinGecko deserialization failed");
+          httpResponse = -256;
+        }
       }
       else
       {
-        Serial.println("  CoinGecko deserialization failed");
+        Serial.println("  CoinGecko body is empty!");
         httpResponse = -256;
       }
     }
