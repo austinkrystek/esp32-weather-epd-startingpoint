@@ -155,6 +155,13 @@ const unsigned long VERY_LOW_BATTERY_SLEEP_INTERVAL = 120; // (minutes)
 const uint32_t MAX_BATTERY_VOLTAGE = 4200; // (millivolts)
 const uint32_t MIN_BATTERY_VOLTAGE = 3000; // (millivolts)
 
+// BATTERY MONITORING (ADVANCED)
+// These settings control ADC sampling and filtering for improved accuracy.
+const uint8_t BAT_ADC_SAMPLES_PER_BURST = 5;
+const uint8_t BAT_ADC_NUM_BURSTS = 3;
+const uint16_t BAT_ADC_SETTLING_TIME_US = 2000;
+const float BAT_EMA_ALPHA = 0.3f;
+
 // See config.h for the below options
 // E-PAPER PANEL
 // LOCALE

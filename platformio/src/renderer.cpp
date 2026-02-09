@@ -1265,6 +1265,10 @@ void drawForecast(const owm_daily_t *daily, tm timeInfo)
  */
 void drawLocationDate(const String &city, const String &date)
 {
+  // Love message centered at top
+  display.setFont(&FONT_7pt8b);
+  drawString(DISP_WIDTH / 2, 10, "MADE WITH LOVE FOR MARIA <3", CENTER);
+
   // location, date
   display.setFont(&FONT_16pt8b);
   drawString(DISP_WIDTH - 2, 23, city, RIGHT, ACCENT_COLOR);
@@ -1795,53 +1799,144 @@ static String formatChange(float change)
   return prefix + String(change, 2) + "%";
 }
 
-/* Draw a sparkline chart within a bounding box with internal padding so
- * the line extremes stay inside the border. Optionally draws a range label
- * (e.g., "7D", "YTD") in the bottom-right corner.
+/* Draw a candlestick chart within a bounding box. Each candlestick shows
+ * OHLC (Open, High, Low, Close) data. Green/hollow for bullish (close > open),
+ * red/filled for bearish (close < open). Includes a sparkline overlay connecting
+ * close prices. High/low range values displayed on the right side.
+ * Optionally draws a range label (e.g., "7D", "30D") in the top-right corner.
  */
-static void drawSparkline(int x, int y, int w, int h,
-                           const float *data, int count,
-                           const char *rangeLabel = nullptr)
+static void drawCandlestick(int x, int y, int w, int h,
+                            const ohlc_data_t *data, int count,
+                            const char *rangeLabel = nullptr)
 {
   if (count < 2) return;
 
-  // Internal padding so the 2px-thick line doesn't touch the border
+  // Reserve space on the right for high/low labels
+  const int labelWidth = 35;  // Space for price labels
   const int pad = 3;
   int plotX = x;
   int plotY = y + pad;
-  int plotW = w;
+  int plotW = w - labelWidth;  // Reduce width to make room for labels
   int plotH = h - 2 * pad;
   if (plotH < 4) plotH = 4;
 
-  // Find min/max
-  float minVal = data[0];
-  float maxVal = data[0];
+  // Find global min/max across all high/low values
+  float minVal = data[0].low;
+  float maxVal = data[0].high;
   for (int i = 1; i < count; ++i)
   {
-    if (data[i] < minVal) minVal = data[i];
-    if (data[i] > maxVal) maxVal = data[i];
+    if (data[i].low < minVal) minVal = data[i].low;
+    if (data[i].high > maxVal) maxVal = data[i].high;
   }
 
   float range = maxVal - minVal;
   if (range < 0.001f) range = 1.0f;
 
-  // Draw the line
-  for (int i = 1; i < count; ++i)
-  {
-    int x0 = plotX + ((i - 1) * plotW) / (count - 1);
-    int x1 = plotX + (i * plotW) / (count - 1);
-    int y0 = plotY + plotH - static_cast<int>(((data[i - 1] - minVal) / range) * plotH);
-    int y1 = plotY + plotH - static_cast<int>(((data[i] - minVal) / range) * plotH);
+  // Calculate candlestick width and spacing
+  int candleWidth = plotW / count;
+  if (candleWidth < 1) candleWidth = 1;
+  if (candleWidth > 8) candleWidth = 8; // Max width for readability
+  int spacing = (plotW - candleWidth * count) / (count + 1);
+  if (spacing < 0) spacing = 0;
 
-    display.drawLine(x0, y0, x1, y1, GxEPD_BLACK);
-    display.drawLine(x0, y0 + 1, x1, y1 + 1, GxEPD_BLACK);
+  // Array to store sparkline points (center X positions and close Y positions)
+  int sparklineX[count];
+  int sparklineY[count];
+
+  // Draw each candlestick and record sparkline points
+  for (int i = 0; i < count; ++i)
+  {
+    float open = data[i].open;
+    float high = data[i].high;
+    float low = data[i].low;
+    float close = data[i].close;
+
+    // Calculate positions
+    int centerX = plotX + spacing + i * (candleWidth + spacing) + candleWidth / 2;
+    int highY = plotY + plotH - static_cast<int>(((high - minVal) / range) * plotH);
+    int lowY = plotY + plotH - static_cast<int>(((low - minVal) / range) * plotH);
+    int openY = plotY + plotH - static_cast<int>(((open - minVal) / range) * plotH);
+    int closeY = plotY + plotH - static_cast<int>(((close - minVal) / range) * plotH);
+
+    // Store sparkline point (close price position)
+    sparklineX[i] = centerX;
+    sparklineY[i] = closeY;
+
+    // Draw high-low wick (thin vertical line)
+    display.drawLine(centerX, highY, centerX, lowY, GxEPD_BLACK);
+
+    // Draw body (open-close rectangle)
+    int bodyTop = min(openY, closeY);
+    int bodyBottom = max(openY, closeY);
+    int bodyHeight = bodyBottom - bodyTop;
+    if (bodyHeight < 1) bodyHeight = 1;
+
+    int bodyLeft = centerX - candleWidth / 2;
+
+    if (close >= open)
+    {
+      // Bullish (up): hollow rectangle
+      display.drawRect(bodyLeft, bodyTop, candleWidth, bodyHeight, GxEPD_BLACK);
+    }
+    else
+    {
+      // Bearish (down): filled rectangle
+      display.fillRect(bodyLeft, bodyTop, candleWidth, bodyHeight, GxEPD_BLACK);
+    }
   }
 
-  // Draw range label in bottom-right corner of chart area
+  // Draw sparkline overlay connecting close prices
+  for (int i = 1; i < count; ++i)
+  {
+    display.drawLine(sparklineX[i-1], sparklineY[i-1],
+                     sparklineX[i], sparklineY[i], GxEPD_BLACK);
+  }
+
+  // Draw high/low range labels on the right side
+  int labelX = x + w - labelWidth + 5;  // Position labels on the right
+  int highLabelY = plotY + 2;  // Top of chart area
+  int lowLabelY = plotY + plotH - 2;  // Bottom of chart area
+
+  display.setFont(&FONT_6pt8b);
+
+  // Format high/low values with commas and appropriate precision
+  auto formatRangeValue = [](float val) -> String {
+    char raw[20];
+    int decimals = (val >= 1000.0f) ? 0 : (val >= 100.0f) ? 1 : 2;
+
+    // Format with appropriate decimal places
+    snprintf(raw, sizeof(raw), "%.*f", decimals, val);
+    String s = raw;
+
+    int dotIdx = s.indexOf('.');
+    if (dotIdx == -1) dotIdx = s.length();  // No decimal point
+    String intPart = s.substring(0, dotIdx);
+    String decPart = (dotIdx < s.length()) ? s.substring(dotIdx) : "";
+
+    // Add commas to integer part
+    String result = "";
+    int len = intPart.length();
+    int start = (intPart.charAt(0) == '-') ? 1 : 0;
+    if (start) result += "-";
+    for (int i = start; i < len; ++i)
+    {
+      if (i > start && (len - i) % 3 == 0) result += ",";
+      result += intPart.charAt(i);
+    }
+    return result + decPart;
+  };
+
+  String highStr = formatRangeValue(maxVal);
+  String lowStr = formatRangeValue(minVal);
+
+  drawString(labelX, highLabelY, highStr, LEFT);
+  drawString(labelX, lowLabelY, lowStr, LEFT);
+
+  // Draw range label in top-right corner, just outside the chart area
   if (rangeLabel)
   {
-    display.setFont(&FONT_5pt8b);
-    drawString(x + w - 2, y + h - 2, rangeLabel, RIGHT);
+    display.setFont(&FONT_6pt8b);
+    drawString(x + w - labelWidth, y - 5, rangeLabel, RIGHT);
   }
 }
 
@@ -1878,13 +1973,31 @@ static void drawAssetCard(int cardX, int cardY, int cardW, int cardH,
   }
 
   // Price — to the right of the circle, below the name
-  display.setFont(&FONT_16pt8b);
-  String priceStr = "$" + formatPrice(asset.price);
-  drawString(nameX, cy + 22, priceStr, LEFT);
+  // For crypto: show both USD and CAD prices
+  if (asset.price_cad > 0.0f)
+  {
+    // USD price (primary)
+    display.setFont(&FONT_16pt8b);
+    String priceStrUSD = "$" + formatPrice(asset.price) + " USD";
+    drawString(nameX, cy + 26, priceStrUSD, LEFT);
+
+    // CAD price (secondary, smaller, below USD price)
+    display.setFont(&FONT_12pt8b);
+    String priceStrCAD = "$" + formatPrice(asset.price_cad) + " CAD";
+    int cadX = nameX + 8; // Indent slightly for visual hierarchy
+    drawString(cadX, cy + 50, priceStrCAD, LEFT);
+  }
+  else
+  {
+    // Other assets: show single price without currency label
+    display.setFont(&FONT_16pt8b);
+    String priceStr = "$" + formatPrice(asset.price);
+    drawString(nameX, cy + 22, priceStr, LEFT);
+  }
 
   // Change percentages — 2 rows of 2, full card width
-  display.setFont(&FONT_7pt8b);
-  int changeY = cy + 36;
+  display.setFont(&FONT_8pt8b);
+  int changeY = (asset.price_cad > 0.0f) ? cy + 66 : cy + 40;
 
   String dayStr = "24h:" + formatChange(asset.change_day);
   String weekStr = "7d:" + formatChange(asset.change_week);
@@ -1893,19 +2006,22 @@ static void drawAssetCard(int cardX, int cardY, int cardW, int cardH,
 
   String monthStr = "30d:" + formatChange(asset.change_month);
   String ytdStr = "1y:" + formatChange(asset.change_ytd);
-  drawString(cardX + pad, changeY + 14, monthStr, LEFT);
-  drawString(cardX + pad + cardW / 2 - pad, changeY + 14, ytdStr, LEFT);
+  drawString(cardX + pad, changeY + 16, monthStr, LEFT);
+  drawString(cardX + pad + cardW / 2 - pad, changeY + 16, ytdStr, LEFT);
 
-  // Sparkline
+  // Candlestick chart with labels
+  const int labelWidth = 35;  // Space reserved for high/low labels on right
   int sparkX = cardX + pad;
-  int sparkY = changeY + 30;
+  int sparkY = changeY + 34;
   int sparkW = cardW - 2 * pad;
   int sparkH = cardH - (sparkY - cardY) - pad;
-  if (sparkH > 6 && asset.sparklineCount >= 2)
+  if (sparkH > 6 && asset.ohlcCount >= 2)
   {
-    display.drawRect(sparkX - 1, sparkY - 1, sparkW + 2, sparkH + 2, GxEPD_BLACK);
-    drawSparkline(sparkX, sparkY, sparkW, sparkH,
-                  asset.sparkline, asset.sparklineCount, chartLabel);
+    // Draw box around candlestick area (excluding label space on right)
+    int boxWidth = sparkW - labelWidth;
+    display.drawRect(sparkX - 1, sparkY - 1, boxWidth + 2, sparkH + 2, GxEPD_BLACK);
+    drawCandlestick(sparkX, sparkY, sparkW, sparkH,
+                    asset.ohlc, asset.ohlcCount, chartLabel);
   }
 }
 
@@ -1918,8 +2034,13 @@ void renderFinancialPage(const page_data_t &data, const char *title,
 {
   // ── Header ──
   const int headerH = 36;
+
   display.setFont(&FONT_14pt8b);
   drawString(8, 24, title, LEFT);
+
+  // Love message centered, aligned with title
+  display.setFont(&FONT_8pt8b);
+  drawString(DISP_WIDTH / 2, 24, "MADE WITH LOVE FOR MARIA <3", CENTER);
 
   // Date + time on right side
   display.setFont(&FONT_11pt8b);
@@ -1950,8 +2071,8 @@ void renderFinancialPage(const page_data_t &data, const char *title,
   display.drawLine(0, gridTop + cardH, DISP_WIDTH - 1, gridTop + cardH, GxEPD_BLACK);
 
   // Determine chart range label based on page type
-  // Page 1 (CRYPTOCURRENCY) uses CoinGecko 7-day sparklines, others use YTD
-  const char *chartLabel = (pageNum == 1) ? "7D" : "YTD";
+  // Page 1 (CRYPTOCURRENCY) uses CoinGecko 7-day sparklines, others use 30-day
+  const char *chartLabel = (pageNum == 1) ? "7D" : "30D";
 
   // Draw 4 asset cards
   for (int i = 0; i < ASSETS_PER_PAGE; ++i)

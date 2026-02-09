@@ -26,6 +26,9 @@
 #include <SPI.h>
 #include <time.h>
 #include <WiFi.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <freertos/semphr.h>
 
 // additional libraries
 #include <Adafruit_BusIO_Register.h>
@@ -49,6 +52,22 @@
 #else
   static const uint16_t OWM_PORT = 443;
 #endif
+
+// ── FreeRTOS Task Structures for Parallel Yahoo Finance Fetching ──
+
+// Maximum number of concurrent fetch tasks (limited by SSL/TLS memory requirements)
+// Each SSL connection needs ~20-30KB for handshake, certificates, and encryption buffers
+#define MAX_CONCURRENT_TASKS 2
+
+// Structure to pass data to Yahoo Finance fetch tasks
+typedef struct {
+  const char* symbol;        // Yahoo symbol to fetch
+  asset_data_t* asset;       // Pointer to asset to populate
+  const char* displaySymbol; // Display symbol
+  const char* name;          // Asset name
+  SemaphoreHandle_t doneSemaphore; // Semaphore to signal completion
+  bool success;              // Whether fetch succeeded
+} YahooFetchTaskData_t;
 
 /* Power-on and connect WiFi.
  * Takes int parameter to store WiFi RSSI, or “Received Signal Strength
@@ -376,7 +395,7 @@ int fetchCoinGecko(page_data_t &page)
 } // end fetchCoinGecko
 
 /* Fetch financial data from Yahoo Finance chart API for a single symbol.
- * Uses range=1mo&interval=1d to get ~22 days of daily data.
+ * Uses range=1mo&interval=1d to get ~30 days of daily data.
  *
  * Returns HTTP_CODE_OK on success, error code otherwise.
  */
@@ -394,7 +413,7 @@ int fetchYahooFinance(const char *symbol, asset_data_t &asset)
   encodedSymbol.replace("^", "%5E");
 
   String uri = "/v8/finance/chart/"
-             + encodedSymbol + "?range=ytd&interval=1d";
+             + encodedSymbol + "?range=1mo&interval=1d";
 
   int httpResponse = 0;
   int attempts = 0;
@@ -434,6 +453,155 @@ int fetchYahooFinance(const char *symbol, asset_data_t &asset)
   return httpResponse;
 } // end fetchYahooFinance
 
+/* FreeRTOS task function for parallel Yahoo Finance fetching.
+ * Each task fetches data for one symbol and signals completion via semaphore.
+ */
+static void yahooFetchTask(void* parameter)
+{
+  YahooFetchTaskData_t* taskData = (YahooFetchTaskData_t*)parameter;
+
+  // Initialize asset with display info
+  strncpy(taskData->asset->displaySymbol, taskData->displaySymbol,
+          sizeof(taskData->asset->displaySymbol) - 1);
+  taskData->asset->displaySymbol[sizeof(taskData->asset->displaySymbol) - 1] = '\0';
+
+  strncpy(taskData->asset->name, taskData->name,
+          sizeof(taskData->asset->name) - 1);
+  taskData->asset->name[sizeof(taskData->asset->name) - 1] = '\0';
+
+  strncpy(taskData->asset->symbol, taskData->symbol,
+          sizeof(taskData->asset->symbol) - 1);
+  taskData->asset->symbol[sizeof(taskData->asset->symbol) - 1] = '\0';
+
+  taskData->asset->valid = false;
+
+  // Fetch data from Yahoo Finance
+  int result = fetchYahooFinance(taskData->symbol, *taskData->asset);
+  taskData->success = (result == HTTP_CODE_OK);
+
+  // Signal completion
+  xSemaphoreGive(taskData->doneSemaphore);
+
+  // Delete this task
+  vTaskDelete(NULL);
+} // end yahooFetchTask
+
+/* Helper function to launch parallel Yahoo Finance fetches with concurrency limit.
+ * Launches tasks in batches to avoid overwhelming the system.
+ */
+static void fetchYahooParallel(const char** symbols, const char** displays,
+                               const char** names, asset_data_t* assets,
+                               int count, page_data_t &page)
+{
+  Serial.println("  Starting parallel fetch with " + String(count) + " assets...");
+
+  // Create semaphore for task completion signaling
+  SemaphoreHandle_t doneSemaphore = xSemaphoreCreateCounting(count, 0);
+  if (doneSemaphore == NULL)
+  {
+    Serial.println("  ERROR: Failed to create semaphore, falling back to sequential");
+    // Fallback to sequential
+    for (int i = 0; i < count; ++i)
+    {
+      strncpy(assets[i].displaySymbol, displays[i], sizeof(assets[i].displaySymbol) - 1);
+      strncpy(assets[i].name, names[i], sizeof(assets[i].name) - 1);
+      strncpy(assets[i].symbol, symbols[i], sizeof(assets[i].symbol) - 1);
+      assets[i].valid = false;
+      if (fetchYahooFinance(symbols[i], assets[i]) == HTTP_CODE_OK)
+      {
+        page.valid = true;
+      }
+    }
+    return;
+  }
+
+  // Prepare task data for all assets
+  YahooFetchTaskData_t taskDataArray[count];
+  for (int i = 0; i < count; ++i)
+  {
+    taskDataArray[i].symbol = symbols[i];
+    taskDataArray[i].asset = &assets[i];
+    taskDataArray[i].displaySymbol = displays[i];
+    taskDataArray[i].name = names[i];
+    taskDataArray[i].doneSemaphore = doneSemaphore;
+    taskDataArray[i].success = false;
+  }
+
+  // Launch tasks in batches to limit concurrency
+  int tasksLaunched = 0;
+  page.valid = false;
+
+  while (tasksLaunched < count)
+  {
+    // Calculate how many tasks to launch in this batch
+    int batchSize = min(MAX_CONCURRENT_TASKS, count - tasksLaunched);
+
+    Serial.println("  Launching batch of " + String(batchSize) + " tasks...");
+
+    // Launch this batch of tasks
+    for (int i = 0; i < batchSize; ++i)
+    {
+      int taskIndex = tasksLaunched + i;
+      BaseType_t result = xTaskCreate(
+        yahooFetchTask,                    // Task function
+        ("YF_" + String(taskIndex)).c_str(), // Task name
+        8192,                               // Stack size (8KB per task)
+        &taskDataArray[taskIndex],          // Task parameter
+        1,                                  // Priority
+        NULL                                // Task handle (we don't need it)
+      );
+
+      if (result != pdPASS)
+      {
+        Serial.println("  ERROR: Failed to create task " + String(taskIndex));
+        taskDataArray[taskIndex].success = false;
+        // Signal semaphore anyway so we don't hang
+        xSemaphoreGive(doneSemaphore);
+      }
+    }
+
+    // Wait for this batch to complete
+    for (int i = 0; i < batchSize; ++i)
+    {
+      // Wait up to 15 seconds for each task
+      if (xSemaphoreTake(doneSemaphore, pdMS_TO_TICKS(15000)) == pdTRUE)
+      {
+        int taskIndex = tasksLaunched + i;
+        if (taskDataArray[taskIndex].success)
+        {
+          page.valid = true; // At least one fetch succeeded
+        }
+      }
+      else
+      {
+        Serial.println("  WARNING: Task " + String(tasksLaunched + i) + " timed out");
+      }
+    }
+
+    tasksLaunched += batchSize;
+
+    // Small delay between batches to let system stabilize
+    if (tasksLaunched < count)
+    {
+      delay(100);
+    }
+  }
+
+  // Clean up
+  vSemaphoreDelete(doneSemaphore);
+
+  // Count successful fetches
+  int successCount = 0;
+  for (int i = 0; i < count; ++i)
+  {
+    if (taskDataArray[i].success)
+    {
+      successCount++;
+    }
+  }
+  Serial.println("  Parallel fetch complete: " + String(successCount) + "/" + String(count) + " succeeded");
+} // end fetchYahooParallel
+
 /* Fetch all financial data for pages 1-4.
  * Populates crypto, indices, commodities, and forex page data.
  */
@@ -447,62 +615,52 @@ void fetchAllFinancialData(page_data_t &cryptoPage,
   // ── Page 1: Crypto (single API call for all 4 coins) ──
   fetchCoinGecko(cryptoPage);
 
-  // ── Page 2: Stock Indices (4 Yahoo Finance calls) ──
-  Serial.println("Fetching Stock Indices...");
+  // ── Page 2: Stock Indices (4 Yahoo Finance calls in parallel) ──
+  Serial.println("Fetching Stock Indices (parallel)...");
   const char *indexSymbols[]  = {INDEX_1_SYMBOL, INDEX_2_SYMBOL, INDEX_3_SYMBOL, INDEX_4_SYMBOL};
   const char *indexDisplays[] = {INDEX_1_DISPLAY, INDEX_2_DISPLAY, INDEX_3_DISPLAY, INDEX_4_DISPLAY};
   const char *indexNames[]    = {INDEX_1_NAME, INDEX_2_NAME, INDEX_3_NAME, INDEX_4_NAME};
   indicesPage.valid = false;
-  for (int i = 0; i < ASSETS_PER_PAGE; ++i)
-  {
-    strncpy(indicesPage.assets[i].displaySymbol, indexDisplays[i], sizeof(indicesPage.assets[i].displaySymbol) - 1);
-    strncpy(indicesPage.assets[i].name, indexNames[i], sizeof(indicesPage.assets[i].name) - 1);
-    strncpy(indicesPage.assets[i].symbol, indexSymbols[i], sizeof(indicesPage.assets[i].symbol) - 1);
-    indicesPage.assets[i].valid = false;
-    if (fetchYahooFinance(indexSymbols[i], indicesPage.assets[i]) == HTTP_CODE_OK)
-    {
-      indicesPage.valid = true;
-    }
-  }
+  fetchYahooParallel(indexSymbols, indexDisplays, indexNames,
+                     indicesPage.assets, ASSETS_PER_PAGE, indicesPage);
   indicesPage.lastUpdated = time(nullptr);
 
-  // ── Page 3: Commodities (4 Yahoo Finance calls) ──
-  Serial.println("Fetching Commodities...");
+  // ── Page 3: Commodities (4 Yahoo Finance calls in parallel) ──
+  Serial.println("Fetching Commodities (parallel)...");
   const char *comSymbols[]  = {COMMODITY_1_SYMBOL, COMMODITY_2_SYMBOL, COMMODITY_3_SYMBOL, COMMODITY_4_SYMBOL};
   const char *comDisplays[] = {COMMODITY_1_DISPLAY, COMMODITY_2_DISPLAY, COMMODITY_3_DISPLAY, COMMODITY_4_DISPLAY};
   const char *comNames[]    = {COMMODITY_1_NAME, COMMODITY_2_NAME, COMMODITY_3_NAME, COMMODITY_4_NAME};
   commoditiesPage.valid = false;
-  for (int i = 0; i < ASSETS_PER_PAGE; ++i)
-  {
-    strncpy(commoditiesPage.assets[i].displaySymbol, comDisplays[i], sizeof(commoditiesPage.assets[i].displaySymbol) - 1);
-    strncpy(commoditiesPage.assets[i].name, comNames[i], sizeof(commoditiesPage.assets[i].name) - 1);
-    strncpy(commoditiesPage.assets[i].symbol, comSymbols[i], sizeof(commoditiesPage.assets[i].symbol) - 1);
-    commoditiesPage.assets[i].valid = false;
-    if (fetchYahooFinance(comSymbols[i], commoditiesPage.assets[i]) == HTTP_CODE_OK)
-    {
-      commoditiesPage.valid = true;
-    }
-  }
+  fetchYahooParallel(comSymbols, comDisplays, comNames,
+                     commoditiesPage.assets, ASSETS_PER_PAGE, commoditiesPage);
   commoditiesPage.lastUpdated = time(nullptr);
 
-  // ── Page 4: Forex (4 Yahoo Finance calls) ──
-  Serial.println("Fetching Forex...");
+  // ── Page 4: Forex (4 Yahoo Finance calls in parallel) ──
+  Serial.println("Fetching Forex (parallel)...");
   const char *fxSymbols[]  = {FX_1_SYMBOL, FX_2_SYMBOL, FX_3_SYMBOL, FX_4_SYMBOL};
   const char *fxDisplays[] = {FX_1_DISPLAY, FX_2_DISPLAY, FX_3_DISPLAY, FX_4_DISPLAY};
   const char *fxNames[]    = {FX_1_NAME, FX_2_NAME, FX_3_NAME, FX_4_NAME};
   forexPage.valid = false;
-  for (int i = 0; i < ASSETS_PER_PAGE; ++i)
-  {
-    strncpy(forexPage.assets[i].displaySymbol, fxDisplays[i], sizeof(forexPage.assets[i].displaySymbol) - 1);
-    strncpy(forexPage.assets[i].name, fxNames[i], sizeof(forexPage.assets[i].name) - 1);
-    strncpy(forexPage.assets[i].symbol, fxSymbols[i], sizeof(forexPage.assets[i].symbol) - 1);
-    forexPage.assets[i].valid = false;
-    if (fetchYahooFinance(fxSymbols[i], forexPage.assets[i]) == HTTP_CODE_OK)
-    {
-      forexPage.valid = true;
+  fetchYahooParallel(fxSymbols, fxDisplays, fxNames,
+                     forexPage.assets, ASSETS_PER_PAGE, forexPage);
+  forexPage.lastUpdated = time(nullptr);
+
+  // ── Calculate CAD prices for crypto assets ──
+  float usdToCAD = USD_TO_CAD_FALLBACK; // fallback rate
+  if (forexPage.valid && forexPage.assets[0].valid) {
+    usdToCAD = forexPage.assets[0].price; // USDCAD=X is first forex asset
+    Serial.println("Using live USD/CAD rate: " + String(usdToCAD, 4));
+  } else {
+    Serial.println("Using fallback USD/CAD rate: " + String(usdToCAD, 4));
+  }
+
+  for (int i = 0; i < ASSETS_PER_PAGE; ++i) {
+    if (cryptoPage.assets[i].valid) {
+      cryptoPage.assets[i].price_cad = cryptoPage.assets[i].price * usdToCAD;
+    } else {
+      cryptoPage.assets[i].price_cad = 0.0f;
     }
   }
-  forexPage.lastUpdated = time(nullptr);
 
   Serial.println("=== Financial data fetch complete ===");
 } // end fetchAllFinancialData

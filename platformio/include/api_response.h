@@ -218,8 +218,17 @@ DeserializationError deserializeAirQuality(WiFiClient &json,
 
 // ── Financial Ticker Data Structures ────────────────────────────────────────
 
-#define SPARKLINE_MAX_POINTS 30
+#define SPARKLINE_MAX_POINTS 20
 #define ASSETS_PER_PAGE       4
+
+// OHLC candlestick data point
+typedef struct ohlc_data
+{
+  float open;
+  float high;
+  float low;
+  float close;
+} ohlc_data_t;
 
 // Generic asset data — works for crypto, stocks, commodities, and forex
 typedef struct asset_data
@@ -227,14 +236,15 @@ typedef struct asset_data
   char    symbol[12];                       // "BTC", "^GSPC", "GC=F"
   char    name[24];                         // "Bitcoin", "S&P 500", "Gold"
   char    displaySymbol[8];                 // What shows in the icon circle
-  float   price;                            // Current price/rate
+  float   price;                            // Current price/rate (USD for crypto)
+  float   price_cad;                        // CAD equivalent (for crypto only)
   float   previousClose;                    // For calculating day change
   float   change_day;                       // % change today
   float   change_week;                      // % change 7 days
   float   change_month;                     // % change 30 days
   float   change_ytd;                       // % change year-to-date (or 1y)
-  float   sparkline[SPARKLINE_MAX_POINTS];  // 30 data points for chart
-  int     sparklineCount;                   // How many points are valid
+  ohlc_data_t ohlc[SPARKLINE_MAX_POINTS];   // Candlestick OHLC data
+  int     ohlcCount;                        // How many candlesticks are valid
   bool    valid;                            // Data fetch succeeded
 } asset_data_t;
 

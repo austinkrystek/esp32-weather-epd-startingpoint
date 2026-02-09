@@ -288,10 +288,31 @@ bool deserializeCoinGecko(const String &jsonStr, page_data_t &page)
   }
 
   JsonArray arr = doc.as<JsonArray>();
-  int idx = 0;
+
+  // Expected coin IDs in order (from user_config.h)
+  const char* expectedIds[ASSETS_PER_PAGE] = {
+    CRYPTO_1_ID, CRYPTO_2_ID, CRYPTO_3_ID, CRYPTO_4_ID
+  };
+
+  int coinsFound = 0;
   for (JsonObject coin : arr)
   {
-    if (idx >= ASSETS_PER_PAGE) break;
+    // Get coin ID from response
+    const char *coinId = coin["id"] | "";
+
+    // Find which slot this coin belongs to by matching ID
+    int idx = -1;
+    for (int i = 0; i < ASSETS_PER_PAGE; ++i)
+    {
+      if (strcmp(coinId, expectedIds[i]) == 0)
+      {
+        idx = i;
+        break;
+      }
+    }
+
+    // Skip if coin doesn't match any expected ID
+    if (idx < 0) continue;
 
     asset_data_t &a = page.assets[idx];
 
@@ -309,34 +330,57 @@ bool deserializeCoinGecko(const String &jsonStr, page_data_t &page)
     a.change_ytd    = coin["price_change_percentage_1y_in_currency"]    | 0.0f;
     a.previousClose = a.price / (1.0f + a.change_day / 100.0f);
 
-    // Extract sparkline data (7-day, ~168 points) — downsample to 30 points
+    // Extract sparkline data (7-day, ~168 points) — convert to OHLC candlesticks
+    // Since CoinGecko sparkline only has prices (no OHLC), we group points into periods
     JsonArray sparkArr = coin["sparkline_in_7d"]["price"];
     int totalPoints = sparkArr.size();
-    a.sparklineCount = 0;
+    a.ohlcCount = 0;
     if (totalPoints > 0)
     {
-      int step = totalPoints / SPARKLINE_MAX_POINTS;
-      if (step < 1) step = 1;
-      for (int s = 0; s < totalPoints && a.sparklineCount < SPARKLINE_MAX_POINTS; s += step)
+      // Group points into candlesticks (e.g., ~6 hourly points = 1 candlestick)
+      int pointsPerCandle = totalPoints / SPARKLINE_MAX_POINTS;
+      if (pointsPerCandle < 1) pointsPerCandle = 1;
+
+      for (int c = 0; c < SPARKLINE_MAX_POINTS && c * pointsPerCandle < totalPoints; ++c)
       {
-        a.sparkline[a.sparklineCount++] = sparkArr[s].as<float>();
+        int startIdx = c * pointsPerCandle;
+        int endIdx = min(startIdx + pointsPerCandle, totalPoints);
+
+        float open = sparkArr[startIdx].as<float>();
+        float close = sparkArr[endIdx - 1].as<float>();
+        float high = open;
+        float low = open;
+
+        // Find high/low within this period
+        for (int i = startIdx; i < endIdx; ++i)
+        {
+          float price = sparkArr[i].as<float>();
+          if (price > high) high = price;
+          if (price < low) low = price;
+        }
+
+        a.ohlc[a.ohlcCount].open = open;
+        a.ohlc[a.ohlcCount].high = high;
+        a.ohlc[a.ohlcCount].low = low;
+        a.ohlc[a.ohlcCount].close = close;
+        ++a.ohlcCount;
       }
     }
 
     Serial.println("[CoinGecko] Parsed: " + String(a.name)
                    + " $" + String(a.price, 2));
     a.valid = true;
-    ++idx;
+    ++coinsFound;
   }
 
   page.lastUpdated = time(nullptr);
-  page.valid = (idx > 0);
-  Serial.println("[CoinGecko] Parsed " + String(idx) + " coins");
+  page.valid = (coinsFound > 0);
+  Serial.println("[CoinGecko] Parsed " + String(coinsFound) + " coins");
   return page.valid;
 } // end deserializeCoinGecko
 
 /* Deserialize Yahoo Finance /v8/finance/chart/ API response for a single symbol.
- * Populates one asset_data_t with current price, previous close, and sparkline.
+ * Populates one asset_data_t with current price, previous close, and OHLC candlestick data.
  *
  * Returns true on success.
  */
@@ -346,6 +390,9 @@ bool deserializeYahooFinance(WiFiClient &json, asset_data_t &asset)
   filter["chart"]["result"][0]["meta"]["regularMarketPrice"]  = true;
   filter["chart"]["result"][0]["meta"]["chartPreviousClose"]  = true;
   filter["chart"]["result"][0]["meta"]["currency"]            = true;
+  filter["chart"]["result"][0]["indicators"]["quote"][0]["open"]  = true;
+  filter["chart"]["result"][0]["indicators"]["quote"][0]["high"]  = true;
+  filter["chart"]["result"][0]["indicators"]["quote"][0]["low"]   = true;
   filter["chart"]["result"][0]["indicators"]["quote"][0]["close"] = true;
 
   JsonDocument doc;
@@ -368,12 +415,15 @@ bool deserializeYahooFinance(WiFiClient &json, asset_data_t &asset)
   asset.price         = meta["regularMarketPrice"] | 0.0f;
   asset.previousClose = meta["chartPreviousClose"] | 0.0f;
 
-  // Extract all close prices (range=ytd gives daily data since Jan 1)
-  JsonArray closes = result["indicators"]["quote"][0]["close"];
+  // Extract OHLC data (range=1mo gives daily data for past ~30 days)
+  JsonObject quote = result["indicators"]["quote"][0];
+  JsonArray opens  = quote["open"];
+  JsonArray highs  = quote["high"];
+  JsonArray lows   = quote["low"];
+  JsonArray closes = quote["close"];
   int totalPoints = closes.size();
 
   // Build a temporary array of valid close prices for calculations
-  // We need the raw data for change calculations before downsampling
   float firstClose = 0.0f;
   float latestClose = 0.0f;
   float prevDayClose = 0.0f;
@@ -381,7 +431,7 @@ bool deserializeYahooFinance(WiFiClient &json, asset_data_t &asset)
   // Scan through all close prices to find key values
   if (totalPoints > 0)
   {
-    // Find first valid close (for YTD calculation)
+    // Find first valid close (for 30D calculation)
     for (int i = 0; i < totalPoints; ++i)
     {
       float val = closes[i].as<float>();
@@ -416,14 +466,14 @@ bool deserializeYahooFinance(WiFiClient &json, asset_data_t &asset)
     asset.change_day = ((latestClose - prevDayClose) / prevDayClose) * 100.0f;
   }
 
-  // Calculate YTD change from first close (Jan 1 area) vs latest
+  // Calculate 30D change from first close vs latest
   if (firstClose > 0.0f && latestClose > 0.0f)
   {
     asset.change_ytd = ((latestClose - firstClose) / firstClose) * 100.0f;
   }
 
-  // Build sparkline (downsample to SPARKLINE_MAX_POINTS)
-  asset.sparklineCount = 0;
+  // Build OHLC candlestick data (downsample to SPARKLINE_MAX_POINTS)
+  asset.ohlcCount = 0;
   if (totalPoints > 0)
   {
     int step = 1;
@@ -431,34 +481,45 @@ bool deserializeYahooFinance(WiFiClient &json, asset_data_t &asset)
     {
       step = totalPoints / SPARKLINE_MAX_POINTS;
     }
-    float lastValid = 0.0f;
-    for (int i = 0; i < totalPoints && asset.sparklineCount < SPARKLINE_MAX_POINTS; i += step)
+
+    ohlc_data_t lastValid = {0.0f, 0.0f, 0.0f, 0.0f};
+
+    for (int i = 0; i < totalPoints && asset.ohlcCount < SPARKLINE_MAX_POINTS; i += step)
     {
-      float val = closes[i].as<float>();
-      if (val > 0.0f)
+      float o = opens[i].as<float>();
+      float h = highs[i].as<float>();
+      float l = lows[i].as<float>();
+      float c = closes[i].as<float>();
+
+      // Use valid data or carry forward last valid
+      if (c > 0.0f && o > 0.0f && h > 0.0f && l > 0.0f)
       {
-        lastValid = val;
+        lastValid.open = o;
+        lastValid.high = h;
+        lastValid.low = l;
+        lastValid.close = c;
       }
-      asset.sparkline[asset.sparklineCount++] = (val > 0.0f) ? val : lastValid;
+
+      asset.ohlc[asset.ohlcCount++] = lastValid;
     }
 
     // Calculate week change (~5 trading days from end) and month change (~22)
-    if (asset.sparklineCount >= 2)
+    if (asset.ohlcCount >= 2)
     {
-      float newest = asset.sparkline[asset.sparklineCount - 1];
+      float newest = asset.ohlc[asset.ohlcCount - 1].close;
 
-      int weekIdx = asset.sparklineCount - 5;
+      int weekIdx = asset.ohlcCount - 5;
       if (weekIdx < 0) weekIdx = 0;
-      float weekPrice = asset.sparkline[weekIdx];
+      float weekPrice = asset.ohlc[weekIdx].close;
       if (weekPrice > 0.0f)
       {
         asset.change_week = ((newest - weekPrice) / weekPrice) * 100.0f;
       }
 
       // Month change: ~22 trading days from end
-      int monthIdx = asset.sparklineCount - 22;
+      int monthIdx = asset.ohlcCount - 22;
       if (monthIdx < 0) monthIdx = 0;
-      float monthPrice = asset.sparkline[monthIdx];
+      float monthPrice = asset.ohlc[monthIdx].close;
       if (monthPrice > 0.0f)
       {
         asset.change_month = ((newest - monthPrice) / monthPrice) * 100.0f;
