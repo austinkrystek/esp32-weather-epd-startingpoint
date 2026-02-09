@@ -343,18 +343,14 @@ bool deserializeCoinGecko(const String &jsonStr, page_data_t &page)
 bool deserializeYahooFinance(WiFiClient &json, asset_data_t &asset)
 {
   JsonDocument filter;
-  filter["chart"]["result"][0]["meta"]["regularMarketPrice"] = true;
-  filter["chart"]["result"][0]["meta"]["previousClose"]      = true;
-  filter["chart"]["result"][0]["meta"]["currency"]           = true;
+  filter["chart"]["result"][0]["meta"]["regularMarketPrice"]  = true;
+  filter["chart"]["result"][0]["meta"]["chartPreviousClose"]  = true;
+  filter["chart"]["result"][0]["meta"]["currency"]            = true;
   filter["chart"]["result"][0]["indicators"]["quote"][0]["close"] = true;
 
   JsonDocument doc;
   DeserializationError error = deserializeJson(doc, json,
                                          DeserializationOption::Filter(filter));
-#if DEBUG_LEVEL >= 1
-  Serial.println("[debug] YahooFinance doc.overflowed() : "
-                 + String(doc.overflowed()));
-#endif
   if (error)
   {
     Serial.println("Yahoo Finance deserialize error: " + String(error.c_str()));
@@ -370,26 +366,66 @@ bool deserializeYahooFinance(WiFiClient &json, asset_data_t &asset)
 
   JsonObject meta = result["meta"];
   asset.price         = meta["regularMarketPrice"] | 0.0f;
-  asset.previousClose = meta["previousClose"]      | 0.0f;
+  asset.previousClose = meta["chartPreviousClose"] | 0.0f;
 
-  // Calculate day change percentage
-  if (asset.previousClose > 0.0f)
-  {
-    asset.change_day = ((asset.price - asset.previousClose) / asset.previousClose) * 100.0f;
-  }
-  else
-  {
-    asset.change_day = 0.0f;
-  }
-
-  // Extract close prices for sparkline
+  // Extract all close prices (range=ytd gives daily data since Jan 1)
   JsonArray closes = result["indicators"]["quote"][0]["close"];
-  asset.sparklineCount = 0;
   int totalPoints = closes.size();
+
+  // Build a temporary array of valid close prices for calculations
+  // We need the raw data for change calculations before downsampling
+  float firstClose = 0.0f;
+  float latestClose = 0.0f;
+  float prevDayClose = 0.0f;
+
+  // Scan through all close prices to find key values
   if (totalPoints > 0)
   {
-    // For 1mo range with 1d interval, we get ~22 trading days
-    // Take up to SPARKLINE_MAX_POINTS
+    // Find first valid close (for YTD calculation)
+    for (int i = 0; i < totalPoints; ++i)
+    {
+      float val = closes[i].as<float>();
+      if (val > 0.0f)
+      {
+        firstClose = val;
+        break;
+      }
+    }
+    // Find last two valid closes (for day change and latest price)
+    for (int i = totalPoints - 1; i >= 0; --i)
+    {
+      float val = closes[i].as<float>();
+      if (val > 0.0f)
+      {
+        if (latestClose == 0.0f)
+        {
+          latestClose = val;
+        }
+        else if (prevDayClose == 0.0f)
+        {
+          prevDayClose = val;
+          break;
+        }
+      }
+    }
+  }
+
+  // Calculate day change from last two close prices
+  if (prevDayClose > 0.0f)
+  {
+    asset.change_day = ((latestClose - prevDayClose) / prevDayClose) * 100.0f;
+  }
+
+  // Calculate YTD change from first close (Jan 1 area) vs latest
+  if (firstClose > 0.0f && latestClose > 0.0f)
+  {
+    asset.change_ytd = ((latestClose - firstClose) / firstClose) * 100.0f;
+  }
+
+  // Build sparkline (downsample to SPARKLINE_MAX_POINTS)
+  asset.sparklineCount = 0;
+  if (totalPoints > 0)
+  {
     int step = 1;
     if (totalPoints > SPARKLINE_MAX_POINTS)
     {
@@ -406,22 +442,26 @@ bool deserializeYahooFinance(WiFiClient &json, asset_data_t &asset)
       asset.sparkline[asset.sparklineCount++] = (val > 0.0f) ? val : lastValid;
     }
 
-    // Calculate week and month changes from sparkline data
+    // Calculate week change (~5 trading days from end) and month change (~22)
     if (asset.sparklineCount >= 2)
     {
-      float oldest = asset.sparkline[0];
       float newest = asset.sparkline[asset.sparklineCount - 1];
-      if (oldest > 0.0f)
-      {
-        asset.change_month = ((newest - oldest) / oldest) * 100.0f;
-      }
-      // Week change: ~5 trading days from end
+
       int weekIdx = asset.sparklineCount - 5;
       if (weekIdx < 0) weekIdx = 0;
       float weekPrice = asset.sparkline[weekIdx];
       if (weekPrice > 0.0f)
       {
         asset.change_week = ((newest - weekPrice) / weekPrice) * 100.0f;
+      }
+
+      // Month change: ~22 trading days from end
+      int monthIdx = asset.sparklineCount - 22;
+      if (monthIdx < 0) monthIdx = 0;
+      float monthPrice = asset.sparkline[monthIdx];
+      if (monthPrice > 0.0f)
+      {
+        asset.change_month = ((newest - monthPrice) / monthPrice) * 100.0f;
       }
     }
   }
