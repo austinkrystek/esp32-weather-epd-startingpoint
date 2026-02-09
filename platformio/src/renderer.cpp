@@ -1763,81 +1763,55 @@ void drawError(const uint8_t *bitmap_196x196,
 // FINANCIAL TICKER RENDERING
 // ══════════════════════════════════════════════════════════════════════════════
 
-/* Format a price as a string with appropriate precision.
- * Large values (>=10000) get no decimals.
- * Medium values (>=100) get 2 decimals.
- * Small values (<1) get 4 decimals.
- * Other values get 2 decimals.
+/* Format a price as a string with commas and always 2 decimal places.
  */
 static String formatPrice(float price)
 {
-  if (price >= 100000.0f)
+  char raw[20];
+  snprintf(raw, sizeof(raw), "%.2f", price);
+  String s = raw;
+  int dotIdx = s.indexOf('.');
+  String intPart = s.substring(0, dotIdx);
+  String decPart = s.substring(dotIdx); // includes "."
+
+  // Add commas to the integer part
+  String result = "";
+  int len = intPart.length();
+  int start = (intPart.charAt(0) == '-') ? 1 : 0;
+  if (start) result += "-";
+  for (int i = start; i < len; ++i)
   {
-    // Large prices like Bitcoin: show as "138,245"
-    int p = static_cast<int>(std::round(price));
-    String s = "";
-    if (p >= 1000000)
-    {
-      s += String(p / 1000000) + ",";
-      p %= 1000000;
-      char buf[8];
-      snprintf(buf, sizeof(buf), "%03d", p / 1000);
-      s += buf;
-      s += ",";
-      snprintf(buf, sizeof(buf), "%03d", p % 1000);
-      s += buf;
-    }
-    else if (p >= 1000)
-    {
-      s += String(p / 1000) + ",";
-      char buf[8];
-      snprintf(buf, sizeof(buf), "%03d", p % 1000);
-      s += buf;
-    }
-    else
-    {
-      s = String(p);
-    }
-    return s;
+    if (i > start && (len - i) % 3 == 0) result += ",";
+    result += intPart.charAt(i);
   }
-  else if (price >= 1000.0f)
-  {
-    int p = static_cast<int>(std::round(price));
-    String s = String(p / 1000) + ",";
-    char buf[8];
-    snprintf(buf, sizeof(buf), "%03d", p % 1000);
-    s += buf;
-    return s;
-  }
-  else if (price >= 100.0f)
-  {
-    return String(price, 2);
-  }
-  else if (price >= 1.0f)
-  {
-    return String(price, 2);
-  }
-  else if (price > 0.0f)
-  {
-    return String(price, 4);
-  }
-  return "0.00";
+  return result + decPart;
 }
 
-/* Format a percentage change with sign and 1 decimal.
+/* Format a percentage change with sign and 2 decimal places.
  */
 static String formatChange(float change)
 {
   String prefix = (change >= 0) ? "+" : "";
-  return prefix + String(change, 1) + "%";
+  return prefix + String(change, 2) + "%";
 }
 
-/* Draw a sparkline chart within a bounding box.
+/* Draw a sparkline chart within a bounding box with internal padding so
+ * the line extremes stay inside the border. Optionally draws a range label
+ * (e.g., "7D", "YTD") in the bottom-right corner.
  */
 static void drawSparkline(int x, int y, int w, int h,
-                           const float *data, int count)
+                           const float *data, int count,
+                           const char *rangeLabel = nullptr)
 {
   if (count < 2) return;
+
+  // Internal padding so the 2px-thick line doesn't touch the border
+  const int pad = 3;
+  int plotX = x;
+  int plotY = y + pad;
+  int plotW = w;
+  int plotH = h - 2 * pad;
+  if (plotH < 4) plotH = 4;
 
   // Find min/max
   float minVal = data[0];
@@ -1849,33 +1823,42 @@ static void drawSparkline(int x, int y, int w, int h,
   }
 
   float range = maxVal - minVal;
-  if (range < 0.001f) range = 1.0f; // avoid division by zero
+  if (range < 0.001f) range = 1.0f;
 
   // Draw the line
   for (int i = 1; i < count; ++i)
   {
-    int x0 = x + ((i - 1) * w) / (count - 1);
-    int x1 = x + (i * w) / (count - 1);
-    int y0 = y + h - static_cast<int>(((data[i - 1] - minVal) / range) * h);
-    int y1 = y + h - static_cast<int>(((data[i] - minVal) / range) * h);
+    int x0 = plotX + ((i - 1) * plotW) / (count - 1);
+    int x1 = plotX + (i * plotW) / (count - 1);
+    int y0 = plotY + plotH - static_cast<int>(((data[i - 1] - minVal) / range) * plotH);
+    int y1 = plotY + plotH - static_cast<int>(((data[i] - minVal) / range) * plotH);
 
-    // Draw 2px thick line
     display.drawLine(x0, y0, x1, y1, GxEPD_BLACK);
     display.drawLine(x0, y0 + 1, x1, y1 + 1, GxEPD_BLACK);
+  }
+
+  // Draw range label in bottom-right corner of chart area
+  if (rangeLabel)
+  {
+    display.setFont(&FONT_5pt8b);
+    drawString(x + w - 2, y + h - 2, rangeLabel, RIGHT);
   }
 }
 
 /* Draw a single asset card within the 2x2 grid.
  * cardX, cardY: top-left corner of this card's area.
  * cardW, cardH: dimensions of this card's area.
+ * chartLabel: range label for the sparkline (e.g., "7D", "YTD").
  */
 static void drawAssetCard(int cardX, int cardY, int cardW, int cardH,
-                           const asset_data_t &asset)
+                           const asset_data_t &asset,
+                           const char *chartLabel)
 {
   const int pad = 8;
   const int circleR = 20;
   int cx = cardX + pad + circleR;
   int cy = cardY + pad + circleR;
+  int nameX = cx + circleR + 8;  // X position to right of circle
 
   // Draw circle with display symbol
   display.drawCircle(cx, cy, circleR, GxEPD_BLACK);
@@ -1883,25 +1866,25 @@ static void drawAssetCard(int cardX, int cardY, int cardW, int cardH,
   display.setFont(&FONT_8pt8b);
   drawString(cx, cy + 4, asset.displaySymbol, CENTER);
 
-  // Asset name
+  // Asset name — vertically centered with circle
   display.setFont(&FONT_12pt8b);
-  drawString(cx + circleR + 8, cardY + pad + 14, asset.name, LEFT);
+  drawString(nameX, cy - 4, asset.name, LEFT);
 
   if (!asset.valid)
   {
     display.setFont(&FONT_8pt8b);
-    drawString(cardX + pad, cardY + pad + 50, "No data", LEFT);
+    drawString(nameX, cy + 14, "No data", LEFT);
     return;
   }
 
-  // Price
+  // Price — to the right of the circle, below the name
   display.setFont(&FONT_16pt8b);
   String priceStr = "$" + formatPrice(asset.price);
-  drawString(cardX + pad, cardY + pad + 58, priceStr, LEFT);
+  drawString(nameX, cy + 22, priceStr, LEFT);
 
-  // Change percentages - 2 rows of 2
+  // Change percentages — 2 rows of 2, full card width
   display.setFont(&FONT_7pt8b);
-  int changeY = cardY + pad + 78;
+  int changeY = cy + 36;
 
   String dayStr = "24h:" + formatChange(asset.change_day);
   String weekStr = "7d:" + formatChange(asset.change_week);
@@ -1920,10 +1903,9 @@ static void drawAssetCard(int cardX, int cardY, int cardW, int cardH,
   int sparkH = cardH - (sparkY - cardY) - pad;
   if (sparkH > 6 && asset.sparklineCount >= 2)
   {
-    // Draw a thin border around the sparkline area
     display.drawRect(sparkX - 1, sparkY - 1, sparkW + 2, sparkH + 2, GxEPD_BLACK);
     drawSparkline(sparkX, sparkY, sparkW, sparkH,
-                  asset.sparkline, asset.sparklineCount);
+                  asset.sparkline, asset.sparklineCount, chartLabel);
   }
 }
 
@@ -1967,6 +1949,10 @@ void renderFinancialPage(const page_data_t &data, const char *title,
   // Horizontal center line
   display.drawLine(0, gridTop + cardH, DISP_WIDTH - 1, gridTop + cardH, GxEPD_BLACK);
 
+  // Determine chart range label based on page type
+  // Page 1 (CRYPTOCURRENCY) uses CoinGecko 7-day sparklines, others use YTD
+  const char *chartLabel = (pageNum == 1) ? "7D" : "YTD";
+
   // Draw 4 asset cards
   for (int i = 0; i < ASSETS_PER_PAGE; ++i)
   {
@@ -1974,7 +1960,7 @@ void renderFinancialPage(const page_data_t &data, const char *title,
     int row = i / 2;
     int cx = col * cardW;
     int cy = gridTop + row * cardH;
-    drawAssetCard(cx, cy, cardW, cardH, data.assets[i]);
+    drawAssetCard(cx, cy, cardW, cardH, data.assets[i], chartLabel);
   }
 
   // ── Footer / Status Bar ──
