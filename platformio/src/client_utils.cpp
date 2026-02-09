@@ -394,7 +394,7 @@ int fetchYahooFinance(const char *symbol, asset_data_t &asset)
   encodedSymbol.replace("^", "%5E");
 
   String uri = "/v8/finance/chart/"
-             + encodedSymbol + "?range=1mo&interval=1d";
+             + encodedSymbol + "?range=ytd&interval=1d";
 
   int httpResponse = 0;
   int attempts = 0;
