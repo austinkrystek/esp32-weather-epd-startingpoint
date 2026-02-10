@@ -18,6 +18,7 @@
 #include <cmath>
 #include <vector>
 #include <Arduino.h>
+#include <Preferences.h>
 #include <driver/adc.h>
 #include <esp_adc_cal.h>
 
@@ -32,7 +33,51 @@
 // icon header files
 #include "icons/icons.h"
 
-/* Returns battery voltage in millivolts (mv).
+/* Performs multi-sample ADC reading with median-of-means filtering.
+ * Returns averaged ADC value (12-bit).
+ */
+uint16_t readBatteryADC()
+{
+  const uint8_t samples_per_burst = BAT_ADC_SAMPLES_PER_BURST;
+  const uint8_t num_bursts = BAT_ADC_NUM_BURSTS;
+
+  uint16_t burst_means[num_bursts];
+
+  // Take multiple bursts of samples
+  for (uint8_t burst = 0; burst < num_bursts; ++burst)
+  {
+    uint32_t sum = 0;
+    for (uint8_t sample = 0; sample < samples_per_burst; ++sample)
+    {
+      sum += analogRead(PIN_BAT_ADC);
+      delayMicroseconds(100); // Brief delay between samples
+    }
+    burst_means[burst] = sum / samples_per_burst;
+  }
+
+  // Sort to find median
+  for (uint8_t i = 0; i < num_bursts - 1; ++i)
+  {
+    for (uint8_t j = i + 1; j < num_bursts; ++j)
+    {
+      if (burst_means[i] > burst_means[j])
+      {
+        uint16_t temp = burst_means[i];
+        burst_means[i] = burst_means[j];
+        burst_means[j] = temp;
+      }
+    }
+  }
+
+  // Return median value
+  return burst_means[num_bursts / 2];
+} // end readBatteryADC
+
+/* Returns battery voltage in millivolts (mv) with improved accuracy.
+ * Features:
+ * - Multi-sample averaging (median-of-means)
+ * - ADC settling time
+ * - Exponential moving average filtering
  */
 uint32_t readBatteryVoltage()
 {
@@ -40,8 +85,17 @@ uint32_t readBatteryVoltage()
   // __attribute__((unused)) disables compiler warnings about this variable
   // being unused (Clang, GCC) which is the case when DEBUG_LEVEL == 0.
   esp_adc_cal_value_t val_type __attribute__((unused));
+
+  // Power up ADC and allow settling time
   adc_power_acquire();
-  uint16_t adc_val = analogRead(PIN_BAT_ADC);
+  if (BAT_ADC_SETTLING_TIME_US > 0)
+  {
+    delayMicroseconds(BAT_ADC_SETTLING_TIME_US);
+  }
+
+  // Perform multi-sample ADC reading
+  uint16_t adc_val = readBatteryADC();
+
   adc_power_release();
 
   // We will use the eFuse ADC calibration bits, to get accurate voltage
@@ -66,11 +120,62 @@ uint32_t readBatteryVoltage()
   }
 #endif
 
-  uint32_t batteryVoltage = esp_adc_cal_raw_to_voltage(adc_val, &adc_chars);
+  // Convert ADC value to voltage
+  uint32_t voltage_raw = esp_adc_cal_raw_to_voltage(adc_val, &adc_chars);
+
   // DFRobot FireBeetle Esp32-E V1.0 voltage divider (1M+1M), so readings are
   // multiplied by 2.
-  batteryVoltage *= 2;
-  return batteryVoltage;
+  voltage_raw *= 2;
+
+  // Apply exponential moving average filter if enabled
+  if (BAT_EMA_ALPHA > 0.0f && BAT_EMA_ALPHA < 1.0f)
+  {
+    Preferences prefs;
+    prefs.begin(NVS_NAMESPACE, false);
+    uint32_t voltage_prev = prefs.getUInt("bat_volt_prev", voltage_raw);
+
+    // Safety check: reject unreasonable previous values (corrupted NVS or first boot)
+    // Valid LiPo range is 3000-4200mV, allow some margin: 2500-4500mV
+    if (voltage_prev < 2500 || voltage_prev > 4500)
+    {
+      voltage_prev = voltage_raw; // Reset to current reading
+    }
+
+    // Detect large jump (charging or battery replacement)
+    int32_t voltage_delta = (int32_t)voltage_raw - (int32_t)voltage_prev;
+    float alpha = BAT_EMA_ALPHA;
+    if (abs(voltage_delta) > 200) // >200mV change
+    {
+      alpha = 0.7f; // Faster response to large changes
+    }
+
+    // Apply EMA filter
+    uint32_t voltage_filtered = (uint32_t)(alpha * voltage_raw +
+                                           (1.0f - alpha) * voltage_prev);
+
+    // Safety check: ensure filtered value is also reasonable
+    if (voltage_filtered < 2500 || voltage_filtered > 4500)
+    {
+      voltage_filtered = voltage_raw; // Use raw value if filtered is unreasonable
+    }
+
+    // Store for next reading
+    prefs.putUInt("bat_volt_prev", voltage_filtered);
+    prefs.end();
+
+#if DEBUG_LEVEL >= 1
+    Serial.print("[debug] Battery: raw=");
+    Serial.print(voltage_raw);
+    Serial.print("mv, filtered=");
+    Serial.print(voltage_filtered);
+    Serial.print("mv, delta=");
+    Serial.println(voltage_delta);
+#endif
+
+    return voltage_filtered;
+  }
+
+  return voltage_raw;
 } // end readBatteryVoltage
 
 /* Returns battery percentage, rounded to the nearest integer.

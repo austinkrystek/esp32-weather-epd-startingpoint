@@ -364,6 +364,12 @@ extern const unsigned long VERY_LOW_BATTERY_SLEEP_INTERVAL;
 extern const uint32_t MAX_BATTERY_VOLTAGE;
 extern const uint32_t MIN_BATTERY_VOLTAGE;
 
+// Battery monitoring advanced configuration
+extern const uint8_t BAT_ADC_SAMPLES_PER_BURST;
+extern const uint8_t BAT_ADC_NUM_BURSTS;
+extern const uint16_t BAT_ADC_SETTLING_TIME_US;
+extern const float BAT_EMA_ALPHA;
+
 // CONFIG VALIDATION - DO NOT MODIFY
 #if !(  defined(DISP_BW_V2)  \
       ^ defined(DISP_3C_B)   \

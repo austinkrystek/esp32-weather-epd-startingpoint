@@ -31,7 +31,7 @@
 #define CRYPTO_2_NAME    "Ethereum"
 
 #define CRYPTO_3_ID      "hyperliquid"
-#define CRYPTO_3_SYMBOL  "HYPE"
+#define CRYPTO_3_SYMBOL  "HL"
 #define CRYPTO_3_NAME    "Hyperliquid"
 
 #define CRYPTO_4_ID      "cardano"
@@ -110,6 +110,13 @@
 #define USD_TO_CAD_FALLBACK  1.42f   // Used if forex fetch fails
 
 // ── CoinGecko Settings ──────────────────────────────────────
-#define COINGECKO_VS_CURRENCY "cad"  // Currency for crypto prices
+#define COINGECKO_VS_CURRENCY "usd"  // Currency for crypto prices
+
+// ── Battery Monitoring (Advanced) ───────────────────────────
+// Multi-sample averaging reduces ADC noise for accurate readings
+#define BAT_ADC_SAMPLES_PER_BURST  5    // Samples per burst (3-10)
+#define BAT_ADC_NUM_BURSTS         3    // Number of bursts (3-5)
+#define BAT_ADC_SETTLING_TIME_US   2000 // ADC settling time (1000-5000 μs)
+#define BAT_EMA_ALPHA              0.3f // EMA smoothing (0.0=off, 0.9=max)
 
 #endif
