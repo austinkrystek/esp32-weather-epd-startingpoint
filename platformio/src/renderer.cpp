@@ -1266,8 +1266,8 @@ void drawForecast(const owm_daily_t *daily, tm timeInfo)
 void drawLocationDate(const String &city, const String &date)
 {
   // Love message centered at top
-  display.setFont(&FONT_7pt8b);
-  drawString(DISP_WIDTH / 2, 10, "MADE WITH LOVE FOR MARIA <3", CENTER);
+  display.setFont(&FONT_8pt8b);
+  drawString(DISP_WIDTH / 2, 24, "MADE WITH LOVE FOR MARIA <3", CENTER);
 
   // location, date
   display.setFont(&FONT_16pt8b);
